@@ -1,0 +1,172 @@
+from fastapi import FastAPI, UploadFile, File
+from pydantic import BaseModel
+import torch
+import time
+import csv
+import tempfile
+import shutil
+
+print("""
+██████╗ ███████╗███╗   ███╗███╗   ███╗ █████╗     ██╗  ██╗    ██████╗ ██╗   ██╗███╗   ██╗███╗   ██╗██╗███╗   ██╗ ██████╗ 
+██╔════╝ ██╔════╝████╗ ████║████╗ ████║██╔══██╗    ██║  ██║    ██╔══██╗██║   ██║████╗  ██║████╗  ██║██║████╗  ██║██╔════╝ 
+██║  ███╗█████╗  ██╔████╔██║██╔████╔██║███████║    ███████║    ██████╔╝██║   ██║██╔██╗ ██║██╔██╗ ██║██║██╔██╗ ██║██║  ███╗
+██║   ██║██╔══╝  ██║╚██╔╝██║██║╚██╔╝██║██╔══██║    ╚════██║    ██╔══██╗██║   ██║██║╚██╗██║██║╚██╗██║██║██║╚██╗██║██║   ██║
+╚██████╔╝███████╗██║ ╚═╝ ██║██║ ╚═╝ ██║██║  ██║         ██║    ██║  ██║╚██████╔╝██║ ╚████║██║ ╚████║██║██║ ╚████║╚██████╔╝
+ ╚═════╝ ╚══════╝╚═╝     ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝         ╚═╝    ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚═╝╚═╝  ╚═══╝ ╚═════╝ 
+                                                                                                                          """)
+
+
+from transformers import AutoProcessor, AutoModelForMultimodalLM
+
+torch.backends.cuda.matmul.allow_tf32 = True
+
+app = FastAPI()
+
+MODEL_ID = "google/gemma-4-E2B-it"
+
+print("🚀 Loading Gemma...")
+
+processor = AutoProcessor.from_pretrained(MODEL_ID)
+
+model = AutoModelForMultimodalLM.from_pretrained(
+    MODEL_ID,
+    torch_dtype=torch.float16,
+    device_map="cuda"
+)
+
+print("✅ Gemma ready on GPU")
+print(torch.cuda.get_device_name(0))
+print(torch.cuda.get_device_capability(0))
+print(torch.cuda.memory_allocated())
+print(torch.cuda.memory_reserved())
+
+# =========================
+# CSV LOGGER
+# =========================
+def log_csv(row):
+    with open("gemma_logs.csv", "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(row)
+
+# =========================
+# COMMON GENERATE FUNCTION
+# =========================
+def run_model(messages):
+    start = time.time()
+
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+        add_generation_prompt=True,
+    ).to(model.device)
+
+    input_len = inputs["input_ids"].shape[-1]
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=120,
+            temperature=1.0,
+            top_p=0.95,
+            top_k=64
+        )
+
+    response = processor.decode(outputs[0][input_len:], skip_special_tokens=True)
+
+    end = time.time()
+
+    return response, start, end, (end - start)
+
+# =========================
+# TEXT
+# =========================
+class TextReq(BaseModel):
+    text: str
+
+@app.post("/text")
+def text_api(req: TextReq):
+
+    messages = [{
+        "role": "system",
+        "content": [{"type": "text", "text": "<|think|> You are a smart assistant"}]
+    },{
+        "role": "user",
+        "content": [{"type": "text", "text": req.text}]
+    }]
+
+    res, s, e, t = run_model(messages)
+
+    log_csv(["text", s, e, t, res])
+
+    return {"response": res, "start": s, "end": e, "latency": t}
+
+# =========================
+# AUDIO
+# =========================
+@app.post("/audio")
+async def audio_api(file: UploadFile = File(...)):
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        path = tmp.name
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "audio", "audio": path},
+            {"type": "text", "text": "Listen and reply naturally."}
+        ]
+    }]
+
+    res, s, e, t = run_model(messages)
+    log_csv(["audio", s, e, t, res])
+
+    return {"response": res, "start": s, "end": e, "latency": t}
+
+# =========================
+# IMAGE
+# =========================
+@app.post("/image")
+async def image_api(file: UploadFile = File(...), text: str = ""):
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        path = tmp.name
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "image", "image": path},
+            {"type": "text", "text": text or "Analyze the person"}
+        ]
+    }]
+
+    res, s, e, t = run_model(messages)
+    log_csv(["image", s, e, t, res])
+
+    return {"response": res, "start": s, "end": e, "latency": t}
+
+# =========================
+# VIDEO
+# =========================
+@app.post("/video")
+async def video_api(file: UploadFile = File(...), text: str = ""):
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        path = tmp.name
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "video", "video": path},
+            {"type": "text", "text": text or "Analyze video"}
+        ]
+    }]
+
+    res, s, e, t = run_model(messages)
+    log_csv(["video", s, e, t, res])
+
+    return {"response": res, "start": s, "end": e, "latency": t}
