@@ -12,7 +12,7 @@ app = FastAPI()
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 model = whisper.load_model("small", device=device)
-print("""
+print(r"""
  /$$      /$$ /$$   /$$ /$$$$$$  /$$$$$$  /$$$$$$$  /$$$$$$$$ /$$$$$$$        /$$$$$$$                                /$$                    
 | $$  /$ | $$| $$  | $$|_  $$_/ /$$__  $$| $$__  $$| $$_____/| $$__  $$      | $$__  $$                              |__/                    
 | $$ /$$$| $$| $$  | $$  | $$  | $$  \__/| $$  \ $$| $$      | $$  \ $$      | $$  \ $$ /$$   /$$ /$$$$$$$  /$$$$$$$  /$$ /$$$$$$$   /$$$$$$ 
@@ -24,11 +24,10 @@ print("""
                                                                                                                                     /$$  \ $$
                                                                                                                                    |  $$$$$$/
                                                                                                                                     \______/ """)
-print(torch.cuda.get_device_name(0))
-print(torch.cuda.get_device_capability(0))
-print(torch.cuda.memory_allocated())
-print(torch.cuda.memory_reserved())
-
+print("DEVICE:",torch.cuda.get_device_name(0))
+print("get_device:",torch.cuda.get_device_capability(0))
+print("memory allocated:",torch.cuda.memory_allocated())
+print("memory reserved:",torch.cuda.memory_reserved())
 def log_csv(row):
     with open("whisper_logs.csv", "a", newline="") as f:
         writer = csv.writer(f)

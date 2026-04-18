@@ -1,3 +1,4 @@
+# uvicorn server_whisper_gemma:app --host 0.0.0.0 --port 8000
 from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 import torch
@@ -5,9 +6,13 @@ import time
 import csv
 import tempfile
 import shutil
+import librosa
+import soundfile as sf
+import cv2
+
 
 print("""
-██████╗ ███████╗███╗   ███╗███╗   ███╗ █████╗     ██╗  ██╗    ██████╗ ██╗   ██╗███╗   ██╗███╗   ██╗██╗███╗   ██╗ ██████╗ 
+██████╗  ███████╗███╗   ███╗███╗   ███╗ █████╗     ██╗  ██╗    ██████╗ ██╗   ██╗███╗   ██╗███╗   ██╗██╗███╗   ██╗ ██████╗ 
 ██╔════╝ ██╔════╝████╗ ████║████╗ ████║██╔══██╗    ██║  ██║    ██╔══██╗██║   ██║████╗  ██║████╗  ██║██║████╗  ██║██╔════╝ 
 ██║  ███╗█████╗  ██╔████╔██║██╔████╔██║███████║    ███████║    ██████╔╝██║   ██║██╔██╗ ██║██╔██╗ ██║██║██╔██╗ ██║██║  ███╗
 ██║   ██║██╔══╝  ██║╚██╔╝██║██║╚██╔╝██║██╔══██║    ╚════██║    ██╔══██╗██║   ██║██║╚██╗██║██║╚██╗██║██║██║╚██╗██║██║   ██║
@@ -17,8 +22,7 @@ print("""
 
 
 from transformers import AutoProcessor, AutoModelForMultimodalLM
-
-torch.backends.cuda.matmul.allow_tf32 = True
+# torch.backends.cuda.matmul.allow_tf32 = True
 
 app = FastAPI()
 
@@ -30,15 +34,16 @@ processor = AutoProcessor.from_pretrained(MODEL_ID)
 
 model = AutoModelForMultimodalLM.from_pretrained(
     MODEL_ID,
-    torch_dtype=torch.float16,
-    device_map="cuda"
+    dtype=torch.float16,
+    device_map="cpu"
 )
+# Define 4-bit quantization configuration
 
-print("✅ Gemma ready on GPU")
-print(torch.cuda.get_device_name(0))
-print(torch.cuda.get_device_capability(0))
-print(torch.cuda.memory_allocated())
-print(torch.cuda.memory_reserved())
+print("✅ Gemma ready on GPU")  
+print("DEVICE:",torch.cuda.get_device_name(0))
+print("get_device:",torch.cuda.get_device_capability(0))
+print("memory allocated:",torch.cuda.memory_allocated())
+print("memory reserved:",torch.cuda.memory_reserved())
 
 # =========================
 # CSV LOGGER
@@ -90,7 +95,7 @@ def text_api(req: TextReq):
 
     messages = [{
         "role": "system",
-        "content": [{"type": "text", "text": "<|think|> You are a smart assistant"}]
+        "content": [{"type": "text", "text": " You are a smart assistant"}]
     },{
         "role": "user",
         "content": [{"type": "text", "text": req.text}]
@@ -112,20 +117,28 @@ async def audio_api(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, tmp)
         path = tmp.name
 
+    # ✅ load + normalize audio (CRITICAL)
+    audio, sr = librosa.load(path, sr=16000)
+
+    # rewrite clean wav
+    sf.write(path, audio, 16000)
+
     messages = [{
         "role": "user",
         "content": [
             {"type": "audio", "audio": path},
-            {"type": "text", "text": "Listen and reply naturally."}
+            {"type": "text", "text": "Listen carefully and reply naturally."}
         ]
     }]
 
-    res, s, e, t = run_model(messages)
+    try:
+        res, s, e, t = run_model(messages)
+    except Exception as e:
+        return {"error": str(e)}
+
     log_csv(["audio", s, e, t, res])
 
-    return {"response": res, "start": s, "end": e, "latency": t}
-
-# =========================
+    return {"response": res, "start": s, "end": e, "latency": t}# =========================
 # IMAGE
 # =========================
 @app.post("/image")
@@ -151,22 +164,57 @@ async def image_api(file: UploadFile = File(...), text: str = ""):
 # =========================
 # VIDEO
 # =========================
+
 @app.post("/video")
 async def video_api(file: UploadFile = File(...), text: str = ""):
 
+    import tempfile, shutil
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
         shutil.copyfileobj(file.file, tmp)
-        path = tmp.name
+        video_path = tmp.name
+
+    # ✅ Extract frames
+    cap = cv2.VideoCapture(video_path)
+
+    frames = []
+    count = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if count % 10 == 0:  # sample frames (IMPORTANT)
+            _, img = cv2.imencode(".jpg", frame)
+            frames.append(img.tobytes())
+
+        count += 1
+
+    cap.release()
+
+    if len(frames) == 0:
+        return {"error": "No frames extracted"}
+
+    # ✅ Use frames as image inputs
+    content = []
+
+    for f in frames[:5]:  # limit frames (CRITICAL)
+        content.append({"type": "image", "image": f})
+
+    content.append({
+        "type": "text",
+        "text": text or "Describe what is happening in this video."
+    })
 
     messages = [{
         "role": "user",
-        "content": [
-            {"type": "video", "video": path},
-            {"type": "text", "text": text or "Analyze video"}
-        ]
+        "content": content
     }]
 
-    res, s, e, t = run_model(messages)
-    log_csv(["video", s, e, t, res])
+    try:
+        res, s, e, t = run_model(messages)
+    except Exception as e:
+        return {"error": str(e)}
 
-    return {"response": res, "start": s, "end": e, "latency": t}
+    return {"response": res, "latency": t}
