@@ -164,17 +164,16 @@ async def image_api(file: UploadFile = File(...), text: str = ""):
 # =========================
 # VIDEO
 # =========================
-
 @app.post("/video")
 async def video_api(file: UploadFile = File(...), text: str = ""):
 
-    import tempfile, shutil
+    import tempfile, shutil, cv2
+    from PIL import Image
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
         shutil.copyfileobj(file.file, tmp)
         video_path = tmp.name
 
-    # ✅ Extract frames
     cap = cv2.VideoCapture(video_path)
 
     frames = []
@@ -185,9 +184,10 @@ async def video_api(file: UploadFile = File(...), text: str = ""):
         if not ret:
             break
 
-        if count % 10 == 0:  # sample frames (IMPORTANT)
-            _, img = cv2.imencode(".jpg", frame)
-            frames.append(img.tobytes())
+        if count % 10 == 0:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb)
+            frames.append(pil_img)
 
         count += 1
 
@@ -196,11 +196,14 @@ async def video_api(file: UploadFile = File(...), text: str = ""):
     if len(frames) == 0:
         return {"error": "No frames extracted"}
 
-    # ✅ Use frames as image inputs
     content = []
 
-    for f in frames[:5]:  # limit frames (CRITICAL)
-        content.append({"type": "image", "image": f})
+    # ✅ images FIRST (Gemma best practice)
+    for img in frames[:5]:
+        content.append({
+            "type": "image",
+            "image": img
+        })
 
     content.append({
         "type": "text",
